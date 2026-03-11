@@ -1,0 +1,135 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# InstaFlow Automation Engine — Docker Compose
+#
+# Services:
+#   postgres   — State database (port 5432)
+#   redis      — Message broker, cache, rate-limiter (port 6379)
+#   api        — FastAPI control plane (port 8000)
+#   worker     — Celery worker (3 concurrent processes)
+#   beat       — Celery Beat periodic scheduler
+#   flower     — Celery monitoring dashboard (port 5555)
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f worker
+# ──────────────────────────────────────────────────────────────────────────────
+
+x-common-env: &common-env
+  env_file: .env
+  POSTGRES_HOST: postgres
+  REDIS_HOST: redis
+
+services:
+
+  # ── Infrastructure ────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: instaflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-instaflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-instaflow}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-instaflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: instaflow_redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Application ───────────────────────────────────────────────────────────
+
+  api:
+    build: .
+    container_name: instaflow_api
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    command: uvicorn instaflow.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+      - ./vaults:/app/vaults
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    container_name: instaflow_worker
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    command: >
+      celery -A instaflow.workers.celery_app worker
+      --loglevel=info
+      --concurrency=${CELERY_CONCURRENCY:-3}
+      --queues=critical,default,low
+      --hostname=worker@%h
+    volumes:
+      - ./exports:/app/exports
+      - ./logs:/app/logs
+      - ./vaults:/app/vaults
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  beat:
+    build: .
+    container_name: instaflow_beat
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    command: >
+      celery -A instaflow.workers.celery_app beat
+      --loglevel=info
+      --scheduler=celery.beat:PersistentScheduler
+    volumes:
+      - ./logs:/app/logs
+    depends_on:
+      - redis
+
+  flower:
+    build: .
+    container_name: instaflow_flower
+    restart: unless-stopped
+    environment:
+      <<: *common-env
+    command: >
+      celery -A instaflow.workers.celery_app flower
+      --port=5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
