@@ -1,0 +1,14 @@
+# ──────────────────────────────────────────────────────────────────────
+# Comment Configuration
+# ──────────────────────────────────────────────────────────────────────
+# The ONLY comment this tool posts is "link".
+#
+# WHY: Creators set up auto-DM funnels that trigger when a follower
+# comments a specific keyword (almost always "link").  The creator's
+# automation then sends a DM containing the CTA / landing page URL.
+#
+# This file exists so the comment text is configurable without a code
+# change, but the default — and expected value — is simply "link".
+# ──────────────────────────────────────────────────────────────────────
+
+comment_text: "link"

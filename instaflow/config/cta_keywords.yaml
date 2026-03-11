@@ -1,0 +1,54 @@
+# ──────────────────────────────────────────────────────────────────────
+# CTA (Call-to-Action) Detection Keywords
+# ──────────────────────────────────────────────────────────────────────
+# Used by the DM Monitor to score incoming DMs for CTA intent.
+# A message scores higher when it contains BOTH a keyword AND a URL.
+# Detection threshold: confidence >= 0.7 → trigger link extraction.
+# ──────────────────────────────────────────────────────────────────────
+
+primary_keywords:
+  - "click"
+  - "tap here"
+  - "check this"
+  - "link"
+  - "join"
+  - "get"
+  - "open"
+  - "visit"
+  - "follow this"
+  - "go to"
+  - "see here"
+  - "access"
+  - "claim"
+  - "redeem"
+  - "sign up"
+  - "register"
+  - "download"
+  - "buy"
+  - "shop"
+  - "order"
+
+secondary_keywords:
+  - "here"
+  - "now"
+  - "free"
+  - "offer"
+  - "limited"
+  - "exclusive"
+  - "bonus"
+  - "reward"
+  - "prize"
+  - "discount"
+
+# URL regex pattern for detecting links in DM text
+url_pattern: 'https?://[^\s<>"{}|\\^`\[\]]+'
+
+# Confidence scoring weights
+scoring:
+  primary_keyword_match: 0.4
+  secondary_keyword_match: 0.15
+  url_present: 0.45
+  multiple_keywords_bonus: 0.1
+
+# Minimum confidence to trigger link extraction
+confidence_threshold: 0.7
