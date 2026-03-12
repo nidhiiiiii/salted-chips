@@ -4,6 +4,7 @@ Tests for the stealth modules — timing, comment engine, rate limiter.
 
 import pytest
 import math
+import asyncio
 
 from instaflow.stealth.comment_engine import get_comment_text
 from instaflow.stealth.timing import _lognormal_delay
