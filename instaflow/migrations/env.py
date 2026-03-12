@@ -20,12 +20,18 @@ from instaflow.storage.models import Base
 config = context.config
 
 # Override sqlalchemy.url from env (so we don't hardcode credentials)
+# Try environment variables first, fall back to config file values
+postgres_user = os.environ.get('POSTGRES_USER', 'instaflow')
+postgres_password = os.environ.get('POSTGRES_PASSWORD', 'instaflow_dev')
+postgres_host = os.environ.get('POSTGRES_HOST', 'localhost')
+postgres_port = os.environ.get('POSTGRES_PORT', '5432')
+postgres_db = os.environ.get('POSTGRES_DB', 'instaflow')
+
 pg_url = (
     f"postgresql+psycopg2://"
-    f"{os.environ['POSTGRES_USER']}:{os.environ['POSTGRES_PASSWORD']}"
-    f"@{os.environ.get('POSTGRES_HOST', 'localhost')}:"
-    f"{os.environ.get('POSTGRES_PORT', '5432')}/"
-    f"{os.environ.get('POSTGRES_DB', 'instaflow')}"
+    f"{postgres_user}:{postgres_password}"
+    f"@{postgres_host}:{postgres_port}/"
+    f"{postgres_db}"
 )
 config.set_main_option("sqlalchemy.url", pg_url)
 

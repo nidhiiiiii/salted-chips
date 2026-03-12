@@ -19,7 +19,13 @@ version: "3.9"
 x-common-env: &common-env
   env_file: .env
   POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
   REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-instaflow}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-instaflow}
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/0
+  CELERY_RESULT_BACKEND: redis://redis:6379/0
 
 services:
 
@@ -70,9 +76,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./exports:/app/exports
-      - ./logs:/app/logs
-      - ./vaults:/app/vaults
+      - app_exports:/app/exports
+      - app_logs:/app/logs
+      - app_vaults:/app/vaults
     depends_on:
       postgres:
         condition: service_healthy
@@ -92,9 +98,9 @@ services:
       --queues=critical,default,low
       --hostname=worker@%h
     volumes:
-      - ./exports:/app/exports
-      - ./logs:/app/logs
-      - ./vaults:/app/vaults
+      - app_exports:/app/exports
+      - app_logs:/app/logs
+      - app_vaults:/app/vaults
     depends_on:
       postgres:
         condition: service_healthy
@@ -112,7 +118,7 @@ services:
       --loglevel=info
       --scheduler=celery.beat:PersistentScheduler
     volumes:
-      - ./logs:/app/logs
+      - app_logs:/app/logs
     depends_on:
       - redis
 
@@ -133,3 +139,6 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  app_exports:
+  app_logs:
+  app_vaults:

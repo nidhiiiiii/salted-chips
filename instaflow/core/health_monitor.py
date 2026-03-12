@@ -106,3 +106,38 @@ class HealthMonitor:
     @staticmethod
     def should_quarantine(score: int) -> bool:
         return score < 40
+
+    @staticmethod
+    async def notify_quarantine(ig_username: str, score: int) -> None:
+        """Send Telegram alert when account is quarantined."""
+        from instaflow.config.settings import get_settings
+
+        settings = get_settings()
+        if not settings.telegram_bot_token or not settings.telegram_chat_id:
+            logger.warning("health.telegram_not_configured")
+            return
+
+        try:
+            import httpx
+
+            message = (
+                f"🚨 *Account Quarantined*\n\n"
+                f"**Account:** `{ig_username}`\n"
+                f"**Health Score:** `{score}`\n"
+                f"**Status:** All activity paused\n\n"
+                f"Please review the account health and resolve any challenges "
+                f"before resuming operations."
+            )
+
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                    json={
+                        "chat_id": settings.telegram_chat_id,
+                        "text": message,
+                        "parse_mode": "Markdown",
+                    },
+                )
+            logger.info("health.quarantine_alert_sent", username=ig_username, score=score)
+        except Exception:
+            logger.exception("health.quarantine_alert_failed", username=ig_username)

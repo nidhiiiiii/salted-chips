@@ -61,7 +61,10 @@ async def _extract_link_async(
     creator_user_id: int,
 ) -> dict:
     from instaflow.storage.database import get_db_session
-    from instaflow.storage.models import ExtractedLink
+    from instaflow.storage.models import ExtractedLink, TaskLog
+
+    task_id = task.request.id or "unknown"
+    start_time = datetime.now(tz=timezone.utc)
 
     logger.info(
         "task.extract.start",
@@ -69,41 +72,81 @@ async def _extract_link_async(
         dm_message_id=dm_message_id,
     )
 
-    # Try Mode A first: HTTP redirect resolution
-    result = await _resolve_via_http(raw_url)
+    try:
+        # Try Mode A first: HTTP redirect resolution
+        result = await _resolve_via_http(raw_url)
 
-    # If HTTP resolution fails or gets blocked, try Playwright
-    if result.get("error") or result["final_url"] == raw_url:
-        logger.info("task.extract.fallback_to_playwright", raw_url=raw_url)
-        result = await _resolve_via_playwright(raw_url)
+        # If HTTP resolution fails or gets blocked, try Playwright
+        if result.get("error") or result["final_url"] == raw_url:
+            logger.info("task.extract.fallback_to_playwright", raw_url=raw_url)
+            result = await _resolve_via_playwright(raw_url)
 
-    # Save to database
-    async with get_db_session() as db:
-        link = ExtractedLink(
-            dm_message_id=dm_message_id,
-            original_url=raw_url,
-            redirect_chain=result["redirect_chain"],
+        # Save to database
+        async with get_db_session() as db:
+            link = ExtractedLink(
+                dm_message_id=dm_message_id,
+                original_url=raw_url,
+                redirect_chain=result["redirect_chain"],
+                final_url=result["final_url"],
+                extraction_method=result["method"],
+                extracted_at=datetime.now(tz=timezone.utc),
+                exported_to_excel=False,
+            )
+            db.add(link)
+            await db.flush()
+            extracted_link_id = link.id
+
+            # Log task completion
+            task_log = TaskLog(
+                task_id=task_id,
+                task_type="extract_link",
+                account_id=account_id,
+                status="completed",
+                started_at=start_time,
+                completed_at=datetime.now(tz=timezone.utc),
+            )
+            db.add(task_log)
+
+        logger.info(
+            "task.extract.completed",
             final_url=result["final_url"],
-            extraction_method=result["method"],
-            extracted_at=datetime.now(tz=timezone.utc),
-            exported_to_excel=False,
+            method=result["method"],
+            hops=len(result["redirect_chain"]),
         )
-        db.add(link)
 
-    logger.info(
-        "task.extract.completed",
-        final_url=result["final_url"],
-        method=result["method"],
-        hops=len(result["redirect_chain"]),
-    )
+        return {
+            "status": "extracted",
+            "original_url": raw_url,
+            "final_url": result["final_url"],
+            "redirect_chain": result["redirect_chain"],
+            "method": result["method"],
+        }
 
-    return {
-        "status": "extracted",
-        "original_url": raw_url,
-        "final_url": result["final_url"],
-        "redirect_chain": result["redirect_chain"],
-        "method": result["method"],
-    }
+    except Exception as exc:
+        logger.exception(
+            "task.extract.failed",
+            raw_url=raw_url,
+            dm_message_id=dm_message_id,
+        )
+
+        # Log task failure
+        try:
+            async with get_db_session() as db:
+                task_log = TaskLog(
+                    task_id=task_id,
+                    task_type="extract_link",
+                    account_id=account_id,
+                    status="failed",
+                    error_message=str(exc),
+                    retries=task.request.retries,
+                    started_at=start_time,
+                    completed_at=datetime.now(tz=timezone.utc),
+                )
+                db.add(task_log)
+        except Exception:
+            pass
+
+        raise task.retry(exc=exc)
 
 
 async def _resolve_via_http(url: str) -> dict[str, Any]:

@@ -88,9 +88,28 @@ async def _process_reel_async(task, reel_url: str, account_id: int) -> dict:
                 logger.warning("task.reel.quarantined", account_id=account_id)
                 return {"status": "skipped", "reason": "account_quarantined"}
 
+        # Acquire proxy based on account's country
+        from instaflow.core.proxy_manager import ProxyManager
+
+        proxy_url = None
+        proxy_id = None
+        async with get_db_session() as db:
+            proxy_mgr = ProxyManager(db)
+            proxy = await proxy_mgr.acquire(country=account.country)
+            if proxy:
+                proxy_url = proxy["url"]
+                proxy_id = proxy["id"]
+                logger.info(
+                    "task.reel.proxy_acquired",
+                    account_id=account_id,
+                    proxy_id=proxy_id,
+                    country=account.country,
+                )
+
         ig_client = InstagramClient(
             account_id=account_id,
             ig_username=account.ig_username,
+            proxy_url=proxy_url,
         )
         await ig_client.initialize()
 
@@ -235,6 +254,12 @@ async def _process_reel_async(task, reel_url: str, account_id: int) -> dict:
         dm_mon = DmMonitor(ig_client, redis, account_id)
         await dm_mon.add_watched_creator(creator_user_id)
 
+        # Release proxy back to pool
+        if proxy_id:
+            async with get_db_session() as db:
+                proxy_mgr = ProxyManager(db)
+                await proxy_mgr.release(proxy_id, failed=False)
+
         await ig_client.close()
 
         result = {
@@ -270,6 +295,15 @@ async def _process_reel_async(task, reel_url: str, account_id: int) -> dict:
             account_id=account_id,
             retry=task.request.retries,
         )
+
+        # Release proxy with failed flag
+        if proxy_id:
+            try:
+                async with get_db_session() as db:
+                    proxy_mgr = ProxyManager(db)
+                    await proxy_mgr.release(proxy_id, failed=True)
+            except Exception:
+                pass
 
         # Update job status in DB
         try:

@@ -53,13 +53,15 @@ async def _watch_dm_async(
     from instaflow.stealth.rate_limiter import RateLimiter
     from instaflow.stealth.timing import Delay
     from instaflow.storage.database import get_db_session
-    from instaflow.storage.models import Account, DmMessage, Reel
+    from instaflow.storage.models import Account, DmMessage, Reel, TaskLog
     from instaflow.storage.redis_client import get_redis
 
     from sqlalchemy import select
 
     redis = await get_redis()
     deadline = datetime.fromisoformat(deadline_iso)
+    task_id = task.request.id or "unknown"
+    start_time = datetime.now(tz=timezone.utc)
 
     # Check if deadline has passed
     if datetime.now(tz=timezone.utc) >= deadline:
@@ -71,6 +73,19 @@ async def _watch_dm_async(
         # Remove from watch list
         dm_mon_cleanup = DmMonitor(None, redis, account_id)
         await dm_mon_cleanup.remove_watched_creator(creator_user_id)
+
+        # Log task completion
+        async with get_db_session() as db:
+            task_log = TaskLog(
+                task_id=task_id,
+                task_type="watch_dm",
+                account_id=account_id,
+                status="no_dm_received",
+                started_at=start_time,
+                completed_at=datetime.now(tz=timezone.utc),
+            )
+            db.add(task_log)
+
         return {"status": "no_dm_received", "creator_user_id": creator_user_id}
 
     # Initialize client
@@ -111,9 +126,10 @@ async def _watch_dm_async(
                         .limit(1)
                     )
                     reel = reel_result.scalar_one_or_none()
+                    reel_id = reel.id if reel else None
 
                     dm_msg = DmMessage(
-                        reel_id=reel.id if reel else None,
+                        reel_id=reel_id,
                         creator_user_id=creator_user_id,
                         message_id=cta["message_id"],
                         message_text=cta["message_text"],
@@ -148,6 +164,19 @@ async def _watch_dm_async(
             # Done watching this creator
             await dm_monitor.remove_watched_creator(creator_user_id)
             await ig_client.close()
+
+            # Log task completion
+            async with get_db_session() as db:
+                task_log = TaskLog(
+                    task_id=task_id,
+                    task_type="watch_dm",
+                    account_id=account_id,
+                    status="cta_found",
+                    started_at=start_time,
+                    completed_at=datetime.now(tz=timezone.utc),
+                )
+                db.add(task_log)
+
             return {"status": "cta_found", "results": cta_results}
 
         else:
@@ -173,4 +202,22 @@ async def _watch_dm_async(
     except Exception as exc:
         logger.exception("task.dm.error", creator_user_id=creator_user_id)
         await ig_client.close()
+
+        # Log task failure
+        try:
+            async with get_db_session() as db:
+                task_log = TaskLog(
+                    task_id=task_id,
+                    task_type="watch_dm",
+                    account_id=account_id,
+                    status="failed",
+                    error_message=str(exc),
+                    retries=task.request.retries,
+                    started_at=start_time,
+                    completed_at=datetime.now(tz=timezone.utc),
+                )
+                db.add(task_log)
+        except Exception:
+            pass
+
         raise task.retry(exc=exc)

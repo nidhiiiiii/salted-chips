@@ -6,12 +6,14 @@ Periodic tasks run by Celery Beat:
   • export_excel:       Export new extracted links to Excel (every hour)
   • recover_proxies:    Move cooled proxies back to active (every 45 min)
   • check_follow_backs: Check if followed creators followed back (every 6h)
+  • process_dead_letter: Process failed tasks from DLQ (every 15 min)
+  • daily_summary:      Send daily stats to Telegram (once per day)
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from instaflow.config.logging import get_logger
 from instaflow.workers.celery_app import app
@@ -107,6 +109,10 @@ async def _health_check_async(account_id: int) -> dict:
                 .where(Account.id == account_id)
                 .values(health_score=new_score, status=status)
             )
+
+        # Send quarantine alert if needed
+        if HealthMonitor.should_quarantine(new_score):
+            await HealthMonitor.notify_quarantine(account.ig_username, new_score)
 
         logger.error(
             "maintenance.health_check.failed",
@@ -290,3 +296,245 @@ async def _check_follow_backs_async(account_id: int) -> dict:
         follow_backs=follow_backs,
     )
     return {"status": "checked", "total": checked, "follow_backs": follow_backs}
+
+
+# ── Dead Letter Queue Processor ────────────────────────────────────────
+
+@app.task(
+    name="instaflow.workers.task_maintenance.process_dead_letter",
+    queue="low",
+)
+def process_dead_letter() -> dict:
+    """
+    Process failed tasks from the dead-letter queue.
+    Sends Telegram alerts for each failed task.
+    """
+    return _run_async(_process_dead_letter_async())
+
+
+async def _process_dead_letter_async() -> dict:
+    from instaflow.storage.database import get_db_session
+    from instaflow.storage.models import TaskLog
+
+    from sqlalchemy import select, update
+
+    async with get_db_session() as db:
+        # Get failed tasks with max retries exhausted
+        result = await db.execute(
+            select(TaskLog).where(
+                TaskLog.status == "failed",
+                TaskLog.retries >= 3,
+            ).order_by(TaskLog.completed_at.desc()).limit(10)
+        )
+        failed_tasks = result.scalars().all()
+
+    if not failed_tasks:
+        return {"status": "no_failed_tasks"}
+
+    # Send Telegram alerts for each
+    for task in failed_tasks:
+        await _send_dlq_telegram_alert(task)
+
+    logger.info(
+        "maintenance.dlq_processed",
+        count=len(failed_tasks),
+    )
+    return {"status": "processed", "count": len(failed_tasks)}
+
+
+async def _send_dlq_telegram_alert(task: "TaskLog") -> None:
+    """Send Telegram alert for a failed task."""
+    from instaflow.config.settings import get_settings
+
+    settings = get_settings()
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        logger.warning("dlq.telegram_not_configured")
+        return
+
+    try:
+        import httpx
+
+        message = (
+            f"❌ *Task Failed (DLQ)*\n\n"
+            f"**Task ID:** `{task.task_id}`\n"
+            f"**Type:** `{task.task_type}`\n"
+            f"**Account ID:** `{task.account_id}`\n"
+            f"**Reel ID:** `{task.reel_id}`\n"
+            f"**Retries:** `{task.retries}`\n"
+            f"**Error:**\n```\n{task.error_message[:500]}\n```\n\n"
+            f"**Time:** {task.completed_at.isoformat() if task.completed_at else 'N/A'}"
+        )
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={
+                    "chat_id": settings.telegram_chat_id,
+                    "text": message,
+                    "parse_mode": "Markdown",
+                },
+            )
+        logger.info("dlq.alert_sent", task_id=task.task_id)
+    except Exception:
+        logger.exception("dlq.alert_failed", task_id=task.task_id)
+
+
+# ── Daily Summary ──────────────────────────────────────────────────────
+
+@app.task(
+    name="instaflow.workers.task_maintenance.daily_summary",
+    queue="low",
+)
+def daily_summary() -> dict:
+    """
+    Send daily summary stats to Telegram.
+    Includes: comments posted, follows made, links extracted, account health.
+    """
+    return _run_async(_daily_summary_async())
+
+
+async def _daily_summary_async() -> dict:
+    from instaflow.storage.database import get_db_session
+    from instaflow.storage.models import Account, ExtractedLink, Follow, Reel, TaskLog
+
+    from sqlalchemy import func, select
+
+    async with get_db_session() as db:
+        # Get stats for last 24 hours
+        yesterday = datetime.now(tz=timezone.utc) - timedelta(days=1)
+
+        # Count reels completed
+        reel_result = await db.execute(
+            select(func.count(Reel.id)).where(
+                Reel.job_status == "completed",
+                Reel.comment_posted_at >= yesterday,
+            )
+        )
+        reels_completed = reel_result.scalar() or 0
+
+        # Count follows
+        follow_result = await db.execute(
+            select(func.count(Follow.id)).where(
+                Follow.followed_at >= yesterday,
+            )
+        )
+        follows_made = follow_result.scalar() or 0
+
+        # Count links extracted
+        link_result = await db.execute(
+            select(func.count(ExtractedLink.id)).where(
+                ExtractedLink.extracted_at >= yesterday,
+            )
+        )
+        links_extracted = link_result.scalar() or 0
+
+        # Count tasks by status
+        task_completed = await db.execute(
+            select(func.count(TaskLog.id)).where(
+                TaskLog.status == "completed",
+                TaskLog.completed_at >= yesterday,
+            )
+        )
+        task_failed = await db.execute(
+            select(func.count(TaskLog.id)).where(
+                TaskLog.status == "failed",
+                TaskLog.completed_at >= yesterday,
+            )
+        )
+        tasks_completed = task_completed.scalar() or 0
+        tasks_failed = task_failed.scalar() or 0
+
+        # Get account health summary
+        accounts_result = await db.execute(
+            select(
+                func.count(Account.id),
+                func.avg(Account.health_score),
+            ).where(Account.status == "active")
+        )
+        accounts_row = accounts_result.one()
+        active_accounts = accounts_row[0] or 0
+        avg_health = accounts_row[1] or 0
+
+        quarantined_result = await db.execute(
+            select(func.count(Account.id)).where(Account.status == "quarantine")
+        )
+        quarantined_accounts = quarantined_result.scalar() or 0
+
+    # Send Telegram summary
+    await _send_daily_summary_telegram(
+        reels_completed=reels_completed,
+        follows_made=follows_made,
+        links_extracted=links_extracted,
+        tasks_completed=tasks_completed,
+        tasks_failed=tasks_failed,
+        active_accounts=active_accounts,
+        avg_health=round(avg_health, 1),
+        quarantined_accounts=quarantined_accounts,
+    )
+
+    logger.info(
+        "maintenance.daily_summary.sent",
+        reels_completed=reels_completed,
+        follows_made=follows_made,
+        links_extracted=links_extracted,
+    )
+    return {
+        "status": "sent",
+        "reels_completed": reels_completed,
+        "follows_made": follows_made,
+        "links_extracted": links_extracted,
+        "tasks_completed": tasks_completed,
+        "tasks_failed": tasks_failed,
+    }
+
+
+async def _send_daily_summary_telegram(
+    reels_completed: int,
+    follows_made: int,
+    links_extracted: int,
+    tasks_completed: int,
+    tasks_failed: int,
+    active_accounts: int,
+    avg_health: float,
+    quarantined_accounts: int,
+) -> None:
+    """Send daily summary to Telegram."""
+    from instaflow.config.settings import get_settings
+
+    settings = get_settings()
+    if not settings.telegram_bot_token or not settings.telegram_chat_id:
+        logger.warning("daily_summary.telegram_not_configured")
+        return
+
+    try:
+        import httpx
+
+        today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+
+        message = (
+            f"📊 *Daily Summary — {today}*\n\n"
+            f"*Engagement Stats*\n"
+            f"• Reels processed: `{reels_completed}`\n"
+            f"• Follows made: `{follows_made}`\n"
+            f"• Links extracted: `{links_extracted}`\n\n"
+            f"*Task Stats*\n"
+            f"• Completed: `{tasks_completed}`\n"
+            f"• Failed: `{tasks_failed}`\n\n"
+            f"*Account Health*\n"
+            f"• Active accounts: `{active_accounts}`\n"
+            f"• Average health: `{avg_health}`\n"
+            f"• Quarantined: `{quarantined_accounts}`"
+        )
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={
+                    "chat_id": settings.telegram_chat_id,
+                    "text": message,
+                    "parse_mode": "Markdown",
+                },
+            )
+        logger.info("daily_summary.telegram_sent")
+    except Exception:
+        logger.exception("daily_summary.telegram_failed")

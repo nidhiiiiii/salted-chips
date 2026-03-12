@@ -53,6 +53,8 @@ app.conf.update(
         "instaflow.workers.task_maintenance.export_excel": {"queue": "low"},
         "instaflow.workers.task_maintenance.recover_proxies": {"queue": "low"},
         "instaflow.workers.task_maintenance.check_follow_backs": {"queue": "low"},
+        "instaflow.workers.task_maintenance.process_dead_letter": {"queue": "low"},
+        "instaflow.workers.task_maintenance.daily_summary": {"queue": "low"},
     },
 
     # Dead letter queue
@@ -78,6 +80,14 @@ app.conf.beat_schedule = {
         "task": "instaflow.workers.task_maintenance.check_follow_backs",
         "schedule": crontab(hour="*/6", minute=0),
         "kwargs": {"account_id": 1},
+    },
+    "process-dead-letter-every-15-min": {
+        "task": "instaflow.workers.task_maintenance.process_dead_letter",
+        "schedule": crontab(minute="*/15"),
+    },
+    "daily-summary-every-day": {
+        "task": "instaflow.workers.task_maintenance.daily_summary",
+        "schedule": crontab(hour=0, minute=0),  # Midnight UTC
     },
 }
 
