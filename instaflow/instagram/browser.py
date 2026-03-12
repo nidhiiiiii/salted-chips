@@ -8,6 +8,7 @@ Uses persistent browser context per account to maintain session cookies.
 Network interception captures the full redirect chain.
 """
 
+import asyncio
 from __future__ import annotations
 
 from typing import Any
